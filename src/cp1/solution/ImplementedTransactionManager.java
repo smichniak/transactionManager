@@ -20,10 +20,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Semaphore;
 
 public class ImplementedTransactionManager implements TransactionManager {
-    private static class SuccessfulOperation { // TODO To static or not to static?
+    private static class SuccessfulOperation {
         private ResourceId resourceId;
         private ResourceOperation operation;
 
@@ -73,26 +72,24 @@ public class ImplementedTransactionManager implements TransactionManager {
 
     private LocalTimeProvider timeProvider;
     private Map<ResourceId, Resource> resources;
-    private Map<ResourceId, Long> resourceLockedBy; // Key: ThreadId
+    private Map<ResourceId, Long> resourceLockedBy; // Value: ThreadId
     private Map<Long, ResourceId> waitsForResource; // Key: ThreadId, Value: Resource the thread is waiting for
     private Map<Long, TransactionStartTime> startTime; // Key: ThreadId, Value: Time of starting the transaction
     private Map<Long, Boolean> isAborted; // ThreadId as key
-//    private Semaphore resourceLockMutex = new Semaphore(1);
 
     private static ThreadLocal<Map<ImplementedTransactionManager, Deque<SuccessfulOperation>>> transactionOperations = ThreadLocal.withInitial(HashMap::new);
 
-
     public ImplementedTransactionManager(Collection<Resource> resources, LocalTimeProvider timeProvider) {
-        this.resources = new ConcurrentHashMap<>(); // Concurrent or not?
+        this.timeProvider = timeProvider;
+        this.resources = new ConcurrentHashMap<>();
         for (Resource resource : resources) {
             this.resources.put(resource.getId(), resource);
         }
 
         this.resourceLockedBy = new ConcurrentHashMap<>();
         this.waitsForResource = new ConcurrentHashMap<>();
-        this.timeProvider = timeProvider;
-        this.isAborted = new ConcurrentHashMap<>();
         this.startTime = new ConcurrentHashMap<>();
+        this.isAborted = new ConcurrentHashMap<>();
     }
 
     @Override
@@ -104,7 +101,6 @@ public class ImplementedTransactionManager implements TransactionManager {
         startTime.put(myThreadId, new TransactionStartTime(timeProvider.getTime(), myThreadId));
         transactionOperations.get().put(this, new ArrayDeque<>());
         isAborted.put(Thread.currentThread().getId(), false);
-
     }
 
     /**
@@ -115,14 +111,11 @@ public class ImplementedTransactionManager implements TransactionManager {
      * @return True if we locked the resource, false if we didn't.
      */
     private synchronized boolean lockResource(ResourceId rid) {
-//        resourceLockMutex.acquire();
         if (!resourceLockedBy.containsKey(rid)) {
             resourceLockedBy.put(rid, Thread.currentThread().getId());
             waitsForResource.remove(Thread.currentThread().getId());
-//            resourceLockMutex.release();
             return true;
         } else {
-//            resourceLockMutex.release();
             return false;
         }
     }
@@ -137,7 +130,6 @@ public class ImplementedTransactionManager implements TransactionManager {
 
         while (!isAborted.get(next) && !endOfPath) {
             cycle.add(next);
-//            System.err.println(cycle);
             if (start == next || !waitsForResource.containsKey(next)) {
                 endOfPath = true;
             } else {
@@ -188,19 +180,15 @@ public class ImplementedTransactionManager implements TransactionManager {
                 waitsForResource.put(myThreadId, rid);
                 Collection<Long> cycle = findCycle();
                 abortYoungest(cycle);
-                notifyAll();
                 if (isTransactionAborted()) {
-                    waitsForResource.remove(myThreadId);
                     throw new ActiveTransactionAborted();
                 } else if (Thread.currentThread().isInterrupted()) {
-                    waitsForResource.remove(myThreadId);
                     throw new InterruptedException();
                 }
             }
             try {
                 wait();
             } catch (InterruptedException interrupted) {
-                waitsForResource.remove(myThreadId);
                 if (isTransactionAborted()) {
                     throw new ActiveTransactionAborted();
                 } else {
@@ -234,8 +222,13 @@ public class ImplementedTransactionManager implements TransactionManager {
         // I have the resource here, already locked
         operation.execute(resources.get(rid)); // Can throw exception, that's OK
 
-        SuccessfulOperation op = new SuccessfulOperation(rid, operation);
-        transactionOperations.get().get(this).addFirst(op);
+        if (Thread.currentThread().isInterrupted()) {
+            operation.undo(resources.get(rid)); // Stan zasobu musi pozostać bez zmian w przypadku wyjątku
+            throw new InterruptedException();
+        } else {
+            SuccessfulOperation op = new SuccessfulOperation(rid, operation);
+            transactionOperations.get().get(this).addFirst(op);
+        }
 
     }
 
@@ -246,9 +239,10 @@ public class ImplementedTransactionManager implements TransactionManager {
                 resourceLockedBy.remove(entry.getKey());
             }
         }
-        notifyAll(); // TODO Good???
+        waitsForResource.remove(myThreadId);
         isAborted.remove(myThreadId);
         transactionOperations.get().remove(this);
+        notifyAll();
     }
 
     @Override

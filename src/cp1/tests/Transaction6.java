@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Autor    :  Paweł Pawłowski
  * Licencja :  MIT
  */
-public class テスト {
+public class Transaction6 {
 
     public static LocalTimeProvider ZeroTimeProvider = () -> 0;
     public static ResourceOperation NopOperation = Helper.makeOperation((o, r) -> {}, (o, r) -> {});
