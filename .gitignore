@@ -8,3 +8,5 @@ transactionManager.iml
 src/Main.java
 
 out/
+
+.DS_Store
