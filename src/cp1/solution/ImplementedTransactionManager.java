@@ -12,12 +12,13 @@ import cp1.base.TransactionManager;
 import cp1.base.UnknownResourceIdException;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 
@@ -40,14 +41,71 @@ public class ImplementedTransactionManager implements TransactionManager {
         }
     }
 
-    private Map<ResourceId, Boolean> isResourceLocked;
+    private static class TransactionStartTime implements Comparable<TransactionStartTime> {
+        private long startTime;
+        private long threadId;
+
+        private TransactionStartTime(long startTime, long threadId) {
+            this.startTime = startTime;
+            this.threadId = threadId;
+        }
+
+        private long getThreadId() {
+            return threadId;
+        }
+
+        @Override
+        public int compareTo(TransactionStartTime other) {
+            if (other.startTime > startTime) { // Other older than this
+                return 1;
+            } else if (other.startTime < startTime) {
+                return -1;
+            } else {
+                if (other.threadId > threadId) {
+                    return 1;
+                } else {
+                    return -1;
+                }
+            }
+
+        }
+    }
+
     private LocalTimeProvider timeProvider;
     private Map<ResourceId, Resource> resources;
-    private Map<Long, Boolean> aborted; // ThreadId as key
+    private Map<ResourceId, Long> resourceLockedBy; // Key: ThreadId
+    private Map<Long, ResourceId> waitsForResource; // Key: ThreadId, Value: Resource the thread is waiting for
+    private Map<Long, TransactionStartTime> startTime; // Key: ThreadId, Value: Time of starting the transaction
+    private Map<Long, Boolean> isAborted; // ThreadId as key
     private Semaphore resourceLockMutex = new Semaphore(1);
 
-    private static ThreadLocal<Map<ImplementedTransactionManager, Set<ResourceId>>> transactions = ThreadLocal.withInitial(HashMap::new);
     private static ThreadLocal<Map<ImplementedTransactionManager, Deque<SuccessfulOperation>>> transactionOperations = ThreadLocal.withInitial(HashMap::new);
+
+
+    public ImplementedTransactionManager(Collection<Resource> resources, LocalTimeProvider timeProvider) {
+        this.resources = new ConcurrentHashMap<>(); // Concurrent or not?
+        for (Resource resource : resources) {
+            this.resources.put(resource.getId(), resource);
+        }
+
+        this.resourceLockedBy = new ConcurrentHashMap<>();
+        this.waitsForResource = new ConcurrentHashMap<>();
+        this.timeProvider = timeProvider;
+        this.isAborted = new ConcurrentHashMap<>();
+        this.startTime = new ConcurrentHashMap<>();
+    }
+
+    @Override
+    public void startTransaction() throws AnotherTransactionActiveException {
+        if (transactionOperations.get().containsKey(this)) {
+            throw new AnotherTransactionActiveException();
+        }
+        long myThreadId = Thread.currentThread().getId();
+        startTime.put(myThreadId, new TransactionStartTime(timeProvider.getTime(), myThreadId));
+        transactionOperations.get().put(this, new ArrayDeque<>());
+        isAborted.put(Thread.currentThread().getId(), false);
+
+    }
 
     /**
      * Checks if a resource with a given Id is locked and tries
@@ -58,38 +116,99 @@ public class ImplementedTransactionManager implements TransactionManager {
      */
     private boolean lockResource(ResourceId rid) throws InterruptedException {
         resourceLockMutex.acquire();
-        if (!isResourceLocked.get(rid)) {
-            isResourceLocked.put(rid, true);
+        if (!resourceLockedBy.containsKey(rid)) {
+            resourceLockedBy.put(rid, Thread.currentThread().getId());
+            waitsForResource.remove(Thread.currentThread().getId());
             resourceLockMutex.release();
             return true;
         } else {
             resourceLockMutex.release();
             return false;
         }
+    }
+
+    private Collection<Long> findCycle() {
+        List<Long> cycle = new ArrayList<>();
+        boolean endOfPath = false;
+        long start = Thread.currentThread().getId();
+        cycle.add(start);
+        ResourceId waitingFor = waitsForResource.get(start);
+        long next = resourceLockedBy.get(waitingFor);
+
+        while (!isAborted.get(next) && !endOfPath) {
+            cycle.add(next);
+//            System.err.println(cycle);
+            if (start == next || !waitsForResource.containsKey(next)) {
+                endOfPath = true;
+            } else {
+                ResourceId nextWaitingFor = waitsForResource.get(next);
+                if (!resourceLockedBy.containsKey(nextWaitingFor)) {
+                    endOfPath = true;
+                } else {
+                    next = resourceLockedBy.get(nextWaitingFor);
+
+                }
+            }
+
+        }
+
+        if (cycle.size() != 1 && cycle.get(0).equals(cycle.get(cycle.size() - 1))) {
+            return cycle;
+        } else {
+            return new ArrayDeque<>(); // No cycle found
+        }
+    }
+
+    private void abortYoungest(Collection<Long> cycle) {
+        if (cycle.size() != 0) {
+            List<TransactionStartTime> candidates = new ArrayList<>();
+            for (long threadId : cycle) {
+                candidates.add(startTime.get(threadId));
+            }
+            Collections.sort(candidates);
+            long toAbort = candidates.get(0).getThreadId();
+
+            isAborted.put(toAbort, true);
+            for (Thread t : Thread.getAllStackTraces().keySet()) {
+                if (t.getId() == toAbort) {
+                    t.interrupt();
+                    break;
+                }
+            }
+
+        }
 
     }
 
-    public ImplementedTransactionManager(Collection<Resource> resources, LocalTimeProvider timeProvider) {
-        this.isResourceLocked = new ConcurrentHashMap<>();
-        this.resources = new ConcurrentHashMap<>(); // Concurrent or not?
-        for (Resource resource : resources) {
-            this.isResourceLocked.put(resource.getId(), false);
-            this.resources.put(resource.getId(), resource); // TODO nullptr exception
+    private synchronized void waitForResource(ResourceId rid) throws InterruptedException, ActiveTransactionAborted {
+        long myThreadId = Thread.currentThread().getId();
+
+        while (!lockResource(rid)) {
+            if (!waitsForResource.containsKey(myThreadId)) {
+                waitsForResource.put(myThreadId, rid);
+                Collection<Long> cycle = findCycle();
+                abortYoungest(cycle);
+                notifyAll();
+                if (isTransactionAborted()) {
+                    waitsForResource.remove(myThreadId);
+                    throw new ActiveTransactionAborted();
+                } else if (Thread.currentThread().isInterrupted()) {
+                    waitsForResource.remove(myThreadId);
+                    throw new InterruptedException();
+                }
+            }
+            try {
+                wait();
+            } catch (InterruptedException interrupted) {
+                waitsForResource.remove(myThreadId);
+                if (isTransactionAborted()) {
+                    throw new ActiveTransactionAborted();
+                } else {
+                    throw interrupted;
+                }
+            }
         }
 
-        this.timeProvider = timeProvider;
-        this.aborted = new ConcurrentHashMap<>();
-    }
-
-    @Override
-    public void startTransaction() throws AnotherTransactionActiveException {
-        Map<ImplementedTransactionManager, Set<ResourceId>> startedTransactions = transactions.get();
-        if (startedTransactions.containsKey(this)) {
-            throw new AnotherTransactionActiveException();
-        }
-        startedTransactions.put(this, new HashSet<>());
-        transactionOperations.get().put(this, new ArrayDeque<>());
-        aborted.put(Thread.currentThread().getId(), false);
     }
 
     @Override
@@ -100,37 +219,37 @@ public class ImplementedTransactionManager implements TransactionManager {
             throw new NoActiveTransactionException();
         } else if (isTransactionAborted()) {
             throw new ActiveTransactionAborted();
-        } else if (!isResourceLocked.containsKey(rid)) {
+        } else if (!resources.containsKey(rid)) {
             throw new UnknownResourceIdException(rid);
         }
-        Set<ResourceId> myResources = transactions.get().get(this);
 
         // Check for interrupted exception
-        if (!lockResource(rid)) {
-            // Waiting for
+        long myThreadId = Thread.currentThread().getId();
+        long differentId = myThreadId + 1; // TODO Ugly
+        if (!resourceLockedBy.containsKey(rid) || resourceLockedBy.getOrDefault(rid, differentId) != myThreadId) {
+            if (!lockResource(rid)) {
+                waitForResource(rid);
+            }
         }
 
         // I have the resource here, already locked
-        transactions.get().get(this).add(rid);
-        try {
-            operation.execute(resources.get(rid));
+        operation.execute(resources.get(rid)); // Can throw exception, that's OK
 
-            SuccessfulOperation op = new SuccessfulOperation(rid, operation);
-            transactionOperations.get().get(this).addFirst(op);
-
-        } catch (ResourceOperationException e) {
-
-        }
-
+        SuccessfulOperation op = new SuccessfulOperation(rid, operation);
+        transactionOperations.get().get(this).addFirst(op);
 
     }
 
-    private void cleanup() {
-        Set<ResourceId> myResources = transactions.get().get(this);
-        for (ResourceId rid : myResources) {
-            isResourceLocked.put(rid, false);
+    private synchronized void cleanup() {
+        long myThreadId = Thread.currentThread().getId();
+        for (Map.Entry<ResourceId, Long> entry : resourceLockedBy.entrySet()) {
+            if (entry.getValue() == myThreadId) {
+                resourceLockedBy.remove(entry.getKey());
+            }
         }
-        aborted.remove(Thread.currentThread().getId());
+        notifyAll(); // TODO Good???
+        isAborted.remove(myThreadId);
+        transactionOperations.get().remove(this);
     }
 
     @Override
@@ -162,11 +281,11 @@ public class ImplementedTransactionManager implements TransactionManager {
 
     @Override
     public boolean isTransactionActive() {
-        return transactions.get().containsKey(this);
+        return transactionOperations.get().containsKey(this);
     }
 
     @Override
     public boolean isTransactionAborted() {
-        return isTransactionActive() && aborted.get(Thread.currentThread().getId());
+        return isTransactionActive() && isAborted.get(Thread.currentThread().getId());
     }
 }
