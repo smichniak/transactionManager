@@ -57,10 +57,10 @@ public class ImplementedTransactionManager implements TransactionManager {
         public int compareTo(TransactionStartTime other) {
             if (other.startTime > startTime) { // Other older than this
                 return 1;
-            } else if (other.startTime < startTime) {
+            } else if (other.startTime < startTime) { // Other younger than this
                 return -1;
             } else {
-                if (other.threadId > threadId) {
+                if (other.threadId > threadId) { // Same start time, we compare threadIds
                     return 1;
                 } else {
                     return -1;
@@ -72,11 +72,12 @@ public class ImplementedTransactionManager implements TransactionManager {
 
     private LocalTimeProvider timeProvider;
     private Map<ResourceId, Resource> resources;
-    private Map<ResourceId, Long> resourceLockedBy; // Value: ThreadId
-    private Map<Long, ResourceId> waitsForResource; // Key: ThreadId, Value: Resource the thread is waiting for
-    private Map<Long, TransactionStartTime> startTime; // Key: ThreadId, Value: Time of starting the transaction
-    private Map<Long, Boolean> isAborted; // ThreadId as key
+    private Map<ResourceId, Long> resourceLockedBy; // Thread with id = value() is in control of Resource with resourceId = key()
+    private Map<Long, ResourceId> waitsForResource; // Thread with id = key() waits for access to Resource with resourceId = value()
+    private Map<Long, TransactionStartTime> startTime; // TransactionStartTime object associated with Thread with id = value()
+    private Map<Long, Boolean> isAborted; // True if Thread with if = key() is aborted, false otherwise
 
+    // Map local for each thread, keeps track of successful operations in TransactionManager = key()
     private static ThreadLocal<Map<ImplementedTransactionManager, Deque<SuccessfulOperation>>> transactionOperations = ThreadLocal.withInitial(HashMap::new);
 
     public ImplementedTransactionManager(Collection<Resource> resources, LocalTimeProvider timeProvider) {
@@ -120,6 +121,14 @@ public class ImplementedTransactionManager implements TransactionManager {
         }
     }
 
+    /**
+     * Finds a cycle in a directed graph of waiting threads. Each thread can wait only
+     * for one resource, so each node has at most one edge going from it. There is only one
+     * path to check starting from the current thread.
+     *
+     * @return Collection of ThreadIds that are part of the cycle, empty if there
+     * is no cycle.
+     */
     private Collection<Long> findCycle() {
         List<Long> cycle = new ArrayList<>();
         boolean endOfPath = false;
@@ -128,6 +137,7 @@ public class ImplementedTransactionManager implements TransactionManager {
         ResourceId waitingFor = waitsForResource.get(start);
         long next = resourceLockedBy.get(waitingFor);
 
+        // Aborted threads don't wait for resources, they can't create cycles
         while (!isAborted.get(next) && !endOfPath) {
             cycle.add(next);
             if (start == next || !waitsForResource.containsKey(next)) {
@@ -144,24 +154,31 @@ public class ImplementedTransactionManager implements TransactionManager {
 
         }
 
+        // Thread can't wait for itself, cycle must be of length > 1, we check equality of first and last thread
         if (cycle.size() != 1 && cycle.get(0).equals(cycle.get(cycle.size() - 1))) {
             return cycle;
-        } else {
-            return new ArrayDeque<>(); // No cycle found
+        } else { // No cycle found
+            return new ArrayDeque<>();
         }
     }
 
+    /**
+     * Aborts the youngest thread in a cycle.
+     *
+     * @param cycle Collection of ThreadIds that are part of the cycle, empty if there
+     * is no cycle.
+     */
     private void abortYoungest(Collection<Long> cycle) {
         if (cycle.size() != 0) {
             List<TransactionStartTime> candidates = new ArrayList<>();
             for (long threadId : cycle) {
                 candidates.add(startTime.get(threadId));
             }
-            Collections.sort(candidates);
-            long toAbort = candidates.get(0).getThreadId();
+            Collections.sort(candidates); // Sorting by age and threadId
+            long toAbort = candidates.get(0).getThreadId(); // Youngest is first
 
             isAborted.put(toAbort, true);
-            for (Thread t : Thread.getAllStackTraces().keySet()) {
+            for (Thread t : Thread.getAllStackTraces().keySet()) { // We find the thread to interrupt
                 if (t.getId() == toAbort) {
                     t.interrupt();
                     break;
@@ -171,7 +188,13 @@ public class ImplementedTransactionManager implements TransactionManager {
         }
 
     }
-
+    /**
+     * Tries to acquire a permission to use given Resource. If the resource is controlled
+     * by other transaction, we wait for it to be free. If we add a new edge to the graph of
+     * waiting, we need to check for cycle and potentially abort a transaction.
+     *
+     * @param rid Id of the Resource we want to acquire.
+     */
     private synchronized void waitForResource(ResourceId rid) throws InterruptedException, ActiveTransactionAborted {
         long myThreadId = Thread.currentThread().getId();
 
@@ -179,10 +202,10 @@ public class ImplementedTransactionManager implements TransactionManager {
             if (!waitsForResource.containsKey(myThreadId)) {
                 waitsForResource.put(myThreadId, rid);
                 Collection<Long> cycle = findCycle();
-                abortYoungest(cycle);
+                abortYoungest(cycle); // Does nothing if there is no cycle
                 if (isTransactionAborted()) {
                     throw new ActiveTransactionAborted();
-                } else if (Thread.currentThread().isInterrupted()) {
+                } else if (Thread.interrupted()) {
                     throw new InterruptedException();
                 }
             }
@@ -211,38 +234,42 @@ public class ImplementedTransactionManager implements TransactionManager {
             throw new UnknownResourceIdException(rid);
         }
 
-        // Check for interrupted exception
         long myThreadId = Thread.currentThread().getId();
-        long differentId = myThreadId + 1; // TODO Ugly
-        if (!resourceLockedBy.containsKey(rid) || resourceLockedBy.getOrDefault(rid, differentId) != myThreadId) {
+        long differentId = myThreadId + 1; // Always different from myThreadId
+
+        // We don't enter if we have previously locked the resource
+        if (resourceLockedBy.getOrDefault(rid, differentId) != myThreadId) {
             if (!lockResource(rid)) {
                 waitForResource(rid);
             }
         }
-        // I have the resource here, already locked
-        operation.execute(resources.get(rid)); // Can throw exception, that's OK
 
-        if (Thread.currentThread().isInterrupted()) {
-            operation.undo(resources.get(rid)); // Stan zasobu musi pozostać bez zmian w przypadku wyjątku
+        if (Thread.interrupted()) {
             throw new InterruptedException();
-        } else {
-            SuccessfulOperation op = new SuccessfulOperation(rid, operation);
-            transactionOperations.get().get(this).addFirst(op);
         }
 
+        operation.execute(resources.get(rid)); // Can throw ResourceOperationException, below code won't be executed
+
+        SuccessfulOperation op = new SuccessfulOperation(rid, operation);
+        transactionOperations.get().get(this).addFirst(op);
     }
 
+
+    /**
+     * Cleans up after a transaction is ended. Removes information that is no longer necessary.
+     */
     private synchronized void cleanup() {
         long myThreadId = Thread.currentThread().getId();
         for (Map.Entry<ResourceId, Long> entry : resourceLockedBy.entrySet()) {
             if (entry.getValue() == myThreadId) {
-                resourceLockedBy.remove(entry.getKey());
+                resourceLockedBy.remove(entry.getKey()); // Unlocks resources that were in control of this thread
             }
         }
         waitsForResource.remove(myThreadId);
         isAborted.remove(myThreadId);
         transactionOperations.get().remove(this);
-        notifyAll();
+        startTime.remove(myThreadId);
+        notifyAll(); // Wakes up other threads, they can lock the released resources
     }
 
     @Override
@@ -263,7 +290,7 @@ public class ImplementedTransactionManager implements TransactionManager {
         }
         Deque<SuccessfulOperation> toReverse = transactionOperations.get().get(this);
 
-        while (!toReverse.isEmpty()) {
+        while (!toReverse.isEmpty()) { // We reverse every successful operation that we did
             SuccessfulOperation op = toReverse.pollFirst();
             ResourceOperation operationToReverse = op.getOperation();
             ResourceId rid = op.getResourceId();
