@@ -77,7 +77,7 @@ public class ImplementedTransactionManager implements TransactionManager {
     private Map<Long, ResourceId> waitsForResource; // Key: ThreadId, Value: Resource the thread is waiting for
     private Map<Long, TransactionStartTime> startTime; // Key: ThreadId, Value: Time of starting the transaction
     private Map<Long, Boolean> isAborted; // ThreadId as key
-    private Semaphore resourceLockMutex = new Semaphore(1);
+//    private Semaphore resourceLockMutex = new Semaphore(1);
 
     private static ThreadLocal<Map<ImplementedTransactionManager, Deque<SuccessfulOperation>>> transactionOperations = ThreadLocal.withInitial(HashMap::new);
 
@@ -114,15 +114,15 @@ public class ImplementedTransactionManager implements TransactionManager {
      * @param rid Id of the resource we want to lock.
      * @return True if we locked the resource, false if we didn't.
      */
-    private boolean lockResource(ResourceId rid) throws InterruptedException {
-        resourceLockMutex.acquire();
+    private synchronized boolean lockResource(ResourceId rid) {
+//        resourceLockMutex.acquire();
         if (!resourceLockedBy.containsKey(rid)) {
             resourceLockedBy.put(rid, Thread.currentThread().getId());
             waitsForResource.remove(Thread.currentThread().getId());
-            resourceLockMutex.release();
+//            resourceLockMutex.release();
             return true;
         } else {
-            resourceLockMutex.release();
+//            resourceLockMutex.release();
             return false;
         }
     }
@@ -231,7 +231,6 @@ public class ImplementedTransactionManager implements TransactionManager {
                 waitForResource(rid);
             }
         }
-
         // I have the resource here, already locked
         operation.execute(resources.get(rid)); // Can throw exception, that's OK
 
