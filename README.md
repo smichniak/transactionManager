@@ -3,7 +3,7 @@ Pierwsze duże zadanie zaliczeniowe z przedmiotu [Programowanie współbieżne](
 
 
 Transakcja to sekwencja operacji, które stanowią pewną całość i jako takie muszą być wykonane niepodzielnie i w izolacji. Niepodzielność oznacza, że albo wykonają się wszystkie operacje z sekwencji stanowiącej transakcję, albo nie wykona się żadna z nich. Izolacja natomiast sprawia, że wyniki poszczególnych operacji z sekwencji danej transakcji nie są widoczne dla operacji z innych transakcji dopóki cała sekwencja danej transakcji się nie zakończy. Zapewnianie niepodzielności i izolacji jest celem zarządcy transakcji. Twoim zadaniem będzie napisanie takiego współbieżnego zarządcy w języku Java zgodnie z poniższymi wymaganiami. Do rozwiązania zadania należy wykorzystać załączony szablon.
-##Specyfikacja
+## Specyfikacja
 
 Rozważmy system, w którym działa pewna (nieznana) liczba wątków. Wątki operują na ustalonej kolekcji zasobów (obiekty klas dziedziczących po klasie cp1.base.Resource z załączonego szablonu), z których każdy ma stały, unikalny identyfikator (cp1.base.ResourceId). W wyniku takich operacji (reprezentowanych przez dowolne obiekty implementujące interfejs cp1.base.ResourceOperation) kolekcja zasobów się nie zmienia, za to może się zmieniać stan poszczególnych zasobów.
 
@@ -40,10 +40,10 @@ public interface TransactionManager {
 ```
 
 Podczas tworzenia (metoda newTM klasy cp1.solution.TransactionManagerFactory) menedżer transakcji otrzymuje kolekcję zasobów, które przechodzą pod jego wyłączną kontrolę, oraz interfejs do pytania o aktualny czas, który jest potrzebny przy zarządzaniu transakcjami.
-###Rozpoczynanie transakcji
+### Rozpoczynanie transakcji
 
 Zanim wątek wykona jakąkolwiek operację na zasobie, musi rozpocząć (aktywować) transakcję poprzez wywołanie metody startTransaction menedżera transakcji (MT). Rozpoczęcie transakcji nie udaje się jedynie wtedy, gdy wątek wywołujący ww. metodę nie zakończył jeszcze poprzedniej transakcji. W takim przypadku wywołanie metody startTransaction MT kończy się zgłoszeniem wyjątku cp1.base.AnotherTransactionActiveException. W efekcie wątek może zakończyć bieżącą transakcję, a następnie ponowić nieudaną próbę rozpoczęcia nowej transakcji. Jeśli natomiast wątkowi uda się rozpocząć transakcję, to transakcja ta pozostaje aktywna do momentu, gdy nie zostanie zakończona w sposób opisany dalej.
-###Wykonywanie operacji w ramach transakcji
+### Wykonywanie operacji w ramach transakcji
 
 Wykonanie przez wątek operacji na zasobie odbywa się poprzez wywołanie przez niego metody operateOnResourceInCurrentTransaction MT, której argumenty oznaczają identyfikator zasobu oraz operację do wykonania. Jeśli wątek nie ma aktywnej transakcji, wywołanie ww. metody kończy się zgłoszeniem wyjątku cp1.base.NoActiveTransactionException. Analogicznie, wywołanie dla identyfikatora zasobu, który nie jest pod kontrolą MT, kończy się wyjątkiem cp1.base.UnknownResourceIdException z argumentem odpowiadającym identyfikatorowi niekontrolowanego zasobu. Wreszcie, jeśli aktywna transakcja została wcześniej anulowana, jak wyjaśniamy dalej, to wywołanie kończy się wyjątkiem cp1.base.ActiveTransactionAborted.
 
@@ -62,7 +62,7 @@ Operacja, której wykonanie nie spowoduje wyjątku cp1.base.ResourceOperationExc
 Niezależnie od tego, jak się zakończy, dana operacja może być przez wątek wykonywana wiele razy, na tych samych lub różnych zasobach. Co więcej, różne wykonania tej samej operacji mogą się różnie kończyć.
 
 Należy także zauważyć, iż w trakcie oczekiwania na zasób lub wykonywania na nim operacji, wątek może zostać przerwany (poprzez wywołanie metody interrupt z klasy Thread). W takim przypadku wywołanie metody operateOnResourceInCurrentTransaction MT kończy się wyjątkiem InterruptedException, pozostawiając bez zmian zarówno stan zasobu, jak i transakcji, przy czym w zależności od momentu, w którym pojawiło się przerwanie, transakcja może dostać lub nie dostęp do zasobu. Dokładniej, jeśli przerwanie pojawiło się przed lub w trakcie przyznawania dostępu, to transakcja tego dostępu nie uzyskuje. W przeciwnym przypadku dostęp zostaje przyznany.
-###Kończenie transakcji
+### Kończenie transakcji
 
 Wątek może zakończyć aktywną transakcję na jeden z dwóch sposobów:
 
@@ -76,9 +76,9 @@ Cofnięcie transakcji powoduje z kolei, że wszelkie zmiany zasobów MT wykonane
 Wycofanie zmian wykonanych przez daną operację na danym zasobie odbywa się poprzez wywołanie na obiekcie tej operacji metody undo interfejsu cp1.base.ResourceOperation z argumentem odpowiadającym zasobowi. Jak w przypadku metody execute, wywołanie metody undo dla operacji musi odbyć się w kontekście wątku, który tę operację zlecił. W przeciwieństwie do metody execute, metoda undo nie zgłasza żadnych wyjątków. Wycofywane są jedynie operacje zakończone sukcesem i robione jest to w odwrotnej kolejności niż kolejność ich wykonania w ramach transakcji.
 
 Zakończenie transakcji na którykolwiek z dwóch możliwych sposobów powoduje, że MT przestaje przechowywać jakiekolwiek informacje związane z tą transakcją.
-###Sprawdzanie stanu transakcji
+### Sprawdzanie stanu transakcji
 
 MT udostępnia jeszcze dwie metody pozwalające wątkowi sprawdzić stan swojej transakcji. Metoda isTransactionActive, wywołana w kontekście wątku, zwraca true wtedy i tylko wtedy, gdy wątek ten ma aktywną transakcję. Metoda isTransactionAborted z kolei zwraca true wtedy i tylko wtedy, gdy wątek ma aktywną transakcję, lecz została ona anulowana.
-##Wymagania
+## Wymagania
 
 Twoim zadaniem jest zaimplementowanie MT według powyższej specyfikacji i dostarczonego szablonu przy wykorzystaniu mechanizmów współbieżności języka Java 11. Musisz zadbać o zapewnienie żywotności i bezpieczeństwa rozwiązania. Staraj się także zmaksymalizować równoległość. W szczególności operacje na różnych zasobach zlecane przez różne wątki powinny wykonywać się równolegle (oczwiście respektując ograniczenia wynikające z powyższej specyfikacji). Twój kod źródłowy powinien być napisany w zgodzie z dobrymi praktykami programistycznymi.
